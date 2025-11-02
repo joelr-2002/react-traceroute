@@ -145,10 +145,21 @@ function App() {
           </ol>
           <div className="mt-4 text-sm text-blue-700">
             <p>
-              💡 <strong>Tip:</strong> Puedes encontrar un archivo CSV de ejemplo en{' '}
+              💡 <strong>Tip:</strong> Si estás ejecutando el proyecto localmente, puedes encontrar un archivo CSV de ejemplo en{' '}
               <code className="bg-blue-100 px-2 py-1 rounded">
                 public/example-routing-table.csv
               </code>
+            </p>
+            <p className="mt-2">
+              📥 O puedes{' '}
+              <a
+                href="./example-routing-table.csv"
+                download="example-routing-table.csv"
+                className="font-semibold underline hover:text-blue-900"
+              >
+                descargar este archivo de ejemplo
+              </a>
+              {' '}para probarlo.
             </p>
           </div>
         </div>
