@@ -165,4 +165,4 @@ MIT
 
 ## 👥 Autor
 
-Creador por Mario Zelaya && Joel Rodríguez
+Creador por Joel Rodríguez
