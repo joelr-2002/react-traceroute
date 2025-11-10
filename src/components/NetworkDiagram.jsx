@@ -1,10 +1,12 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useCallback } from 'react';
 import ReactFlow, {
   Background,
   Controls,
   MiniMap,
   useNodesState,
   useEdgesState,
+  addEdge,
+  MarkerType,
 } from 'reactflow';
 import 'reactflow/dist/style.css';
 
@@ -13,10 +15,13 @@ import 'reactflow/dist/style.css';
  * Visualiza la topología de red usando ReactFlow
  * Muestra equipos como nodos y conexiones como edges
  * Resalta la ruta del traceroute cuando está disponible
+ * Permite agregar nodos y conexiones manualmente
  */
-const NetworkDiagram = ({ routingData, traceResult }) => {
+const NetworkDiagram = ({ routingData, traceResult, onRoutingDataChange, editMode = false }) => {
   const [nodes, setNodes, onNodesChange] = useNodesState([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState([]);
+  const [editingNode, setEditingNode] = useState(null);
+  const [showNodeDialog, setShowNodeDialog] = useState(false);
 
   useEffect(() => {
     if (!routingData || routingData.length === 0) {
@@ -125,27 +130,175 @@ const NetworkDiagram = ({ routingData, traceResult }) => {
     return (ipNum & maskNum) === (networkNum & maskNum);
   };
 
+  // Manejo de conexiones entre nodos
+  const onConnect = useCallback((params) => {
+    if (!editMode) return;
+
+    const newEdge = {
+      ...params,
+      type: 'default',
+      markerEnd: {
+        type: MarkerType.ArrowClosed,
+      },
+      style: { stroke: '#d1d5db', strokeWidth: 2 },
+    };
+
+    setEdges((eds) => addEdge(newEdge, eds));
+
+    // Agregar ruta a routingData
+    if (onRoutingDataChange) {
+      const sourceEquipo = nodes.find(n => n.id === params.source)?.data.label;
+      const targetEquipo = nodes.find(n => n.id === params.target)?.data.label;
+
+      if (sourceEquipo && targetEquipo) {
+        const newRoute = {
+          Equipo: sourceEquipo,
+          IP_Destino: '0.0.0.0',
+          Mascara: '/0',
+          Gateway: 'directo', // Por defecto, el usuario puede editarlo después
+        };
+        onRoutingDataChange([...routingData, newRoute]);
+      }
+    }
+  }, [editMode, nodes, setEdges, routingData, onRoutingDataChange]);
+
+  // Agregar nuevo nodo
+  const handleAddNode = useCallback(() => {
+    if (!editMode) return;
+
+    const newNodeName = prompt('Nombre del nuevo equipo:');
+    if (!newNodeName || newNodeName.trim() === '') return;
+
+    const newNode = {
+      id: newNodeName,
+      data: { label: newNodeName },
+      position: { x: 400, y: 300 },
+      style: {
+        background: '#f3f4f6',
+        color: '#1f2937',
+        border: '2px solid #d1d5db',
+        borderRadius: '8px',
+        padding: '12px 20px',
+        fontSize: '14px',
+        fontWeight: 'normal',
+        boxShadow: '0 2px 4px rgba(0,0,0,0.1)',
+      },
+    };
+
+    setNodes((nds) => [...nds, newNode]);
+
+    // Agregar entrada de ruteo por defecto
+    if (onRoutingDataChange) {
+      const newRoute = {
+        Equipo: newNodeName,
+        IP_Destino: '0.0.0.0',
+        Mascara: '/0',
+        Gateway: 'directo',
+      };
+      onRoutingDataChange([...routingData, newRoute]);
+    }
+  }, [editMode, setNodes, routingData, onRoutingDataChange]);
+
+  // Eliminar nodo
+  const handleDeleteNode = useCallback((nodeId) => {
+    if (!editMode) return;
+
+    if (confirm('¿Eliminar este nodo y todas sus conexiones?')) {
+      setNodes((nds) => nds.filter(n => n.id !== nodeId));
+      setEdges((eds) => eds.filter(e => e.source !== nodeId && e.target !== nodeId));
+
+      // Eliminar de routingData
+      if (onRoutingDataChange) {
+        const nodeName = nodes.find(n => n.id === nodeId)?.data.label;
+        const filtered = routingData.filter(r => r.Equipo !== nodeName);
+        onRoutingDataChange(filtered);
+      }
+    }
+  }, [editMode, nodes, setNodes, setEdges, routingData, onRoutingDataChange]);
+
+  // Eliminar edge
+  const handleDeleteEdge = useCallback((edgeId) => {
+    if (!editMode) return;
+
+    setEdges((eds) => eds.filter(e => e.id !== edgeId));
+  }, [editMode, setEdges]);
+
+  // Manejador de doble click en nodos (para editar)
+  const onNodeDoubleClick = useCallback((event, node) => {
+    if (!editMode) return;
+
+    const newName = prompt('Nuevo nombre del equipo:', node.data.label);
+    if (newName && newName.trim() !== '' && newName !== node.data.label) {
+      // Actualizar nodo
+      setNodes((nds) =>
+        nds.map((n) =>
+          n.id === node.id
+            ? { ...n, data: { ...n.data, label: newName } }
+            : n
+        )
+      );
+
+      // Actualizar routingData
+      if (onRoutingDataChange) {
+        const updated = routingData.map(r =>
+          r.Equipo === node.data.label
+            ? { ...r, Equipo: newName }
+            : r
+        );
+        onRoutingDataChange(updated);
+      }
+    }
+  }, [editMode, setNodes, routingData, onRoutingDataChange]);
+
   if (!routingData || routingData.length === 0) {
     return (
       <div className="w-full h-96 bg-white rounded-lg shadow-md flex items-center justify-center">
-        <p className="text-gray-500">Carga un archivo CSV para ver el diagrama de red</p>
+        <p className="text-gray-500">Carga un archivo CSV o activa el modo edición para crear tu red</p>
       </div>
     );
   }
 
   return (
     <div className="w-full bg-white rounded-lg shadow-md p-6">
-      <h2 className="text-xl font-semibold text-gray-800 mb-4">
-        Diagrama de Red
-      </h2>
+      <div className="flex justify-between items-center mb-4">
+        <h2 className="text-xl font-semibold text-gray-800">
+          Diagrama de Red
+        </h2>
+        {editMode && (
+          <div className="flex gap-2">
+            <button
+              onClick={handleAddNode}
+              className="px-3 py-1 bg-green-600 text-white text-sm rounded hover:bg-green-700 transition-colors"
+              title="Agregar nodo"
+            >
+              + Nodo
+            </button>
+          </div>
+        )}
+      </div>
+
+      {editMode && (
+        <div className="mb-3 p-2 bg-blue-50 border border-blue-200 rounded text-sm text-blue-800">
+          <strong>Modo Edición:</strong> Arrastra para mover nodos. Conecta nodos arrastrando desde un borde. Doble-click en nodos para renombrar.
+        </div>
+      )}
+
       <div className="w-full h-96 border border-gray-200 rounded-lg overflow-hidden">
         <ReactFlow
           nodes={nodes}
           edges={edges}
           onNodesChange={onNodesChange}
           onEdgesChange={onEdgesChange}
+          onConnect={onConnect}
+          onNodeDoubleClick={onNodeDoubleClick}
           fitView
           attributionPosition="bottom-left"
+          connectionMode="loose"
+          snapToGrid={editMode}
+          snapGrid={[15, 15]}
+          nodesDraggable={editMode}
+          nodesConnectable={editMode}
+          elementsSelectable={editMode}
         >
           <Background color="#f3f4f6" gap={16} />
           <Controls />
