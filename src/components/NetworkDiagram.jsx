@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import ReactFlow, {
   Background,
   Controls,
@@ -20,24 +20,33 @@ import 'reactflow/dist/style.css';
 const NetworkDiagram = ({ routingData, traceResult, onRoutingDataChange, editMode = false }) => {
   const [nodes, setNodes, onNodesChange] = useNodesState([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState([]);
-  const [editingNode, setEditingNode] = useState(null);
-  const [showNodeDialog, setShowNodeDialog] = useState(false);
+  const nodePositionsRef = useRef({});
+  const isConnectingRef = useRef(false);
 
   useEffect(() => {
     if (!routingData || routingData.length === 0) {
       setNodes([]);
       setEdges([]);
+      nodePositionsRef.current = {};
       return;
     }
 
     // Crear nodos para cada equipo único
     const equipos = [...new Set(routingData.map(r => r.Equipo))];
+
     const newNodes = equipos.map((equipo, index) => {
-      // Distribuir nodos en círculo
-      const angle = (index / equipos.length) * 2 * Math.PI;
-      const radius = 250;
-      const x = 400 + radius * Math.cos(angle);
-      const y = 300 + radius * Math.sin(angle);
+      // Usar posición guardada si existe, sino calcular nueva posición circular
+      let position;
+      if (nodePositionsRef.current[equipo]) {
+        position = nodePositionsRef.current[equipo];
+      } else {
+        const angle = (index / equipos.length) * 2 * Math.PI;
+        const radius = 250;
+        const x = 400 + radius * Math.cos(angle);
+        const y = 300 + radius * Math.sin(angle);
+        position = { x, y };
+        nodePositionsRef.current[equipo] = position;
+      }
 
       // Verificar si este nodo está en la ruta
       const isInPath = traceResult?.hops?.some(
@@ -47,7 +56,7 @@ const NetworkDiagram = ({ routingData, traceResult, onRoutingDataChange, editMod
       return {
         id: equipo,
         data: { label: equipo },
-        position: { x, y },
+        position,
         style: {
           background: isInPath ? '#3b82f6' : '#f3f4f6',
           color: isInPath ? '#ffffff' : '#1f2937',
@@ -83,6 +92,9 @@ const NetworkDiagram = ({ routingData, traceResult, onRoutingDataChange, editMod
               target: targetEquipo.Equipo,
               animated: false,
               style: { stroke: '#d1d5db', strokeWidth: 2 },
+              markerEnd: {
+                type: MarkerType.ArrowClosed,
+              },
             });
           }
         }
@@ -111,6 +123,16 @@ const NetworkDiagram = ({ routingData, traceResult, onRoutingDataChange, editMod
     setEdges(Array.from(edgesMap.values()));
   }, [routingData, traceResult]);
 
+  // Actualizar posiciones cuando los nodos se mueven
+  const handleNodesChange = useCallback((changes) => {
+    changes.forEach(change => {
+      if (change.type === 'position' && change.position && change.id) {
+        nodePositionsRef.current[change.id] = change.position;
+      }
+    });
+    onNodesChange(changes);
+  }, [onNodesChange]);
+
   // Helper: Verificar si una IP está en una red
   const isIPInNetwork = (ip, network, mask) => {
     if (!ip || !network || !mask) return false;
@@ -130,37 +152,142 @@ const NetworkDiagram = ({ routingData, traceResult, onRoutingDataChange, editMod
     return (ipNum & maskNum) === (networkNum & maskNum);
   };
 
+  // Obtener red del equipo destino
+  const getEquipmentNetwork = (equipName) => {
+    const directRoutes = routingData.filter(r =>
+      r.Equipo === equipName &&
+      r.Gateway === 'directo' &&
+      r.IP_Destino !== '0.0.0.0'
+    );
+    return directRoutes[0] || null;
+  };
+
   // Manejo de conexiones entre nodos
   const onConnect = useCallback((params) => {
-    if (!editMode) return;
+    if (!editMode || isConnectingRef.current) return;
 
-    const newEdge = {
-      ...params,
-      type: 'default',
-      markerEnd: {
-        type: MarkerType.ArrowClosed,
-      },
-      style: { stroke: '#d1d5db', strokeWidth: 2 },
-    };
+    isConnectingRef.current = true;
 
-    setEdges((eds) => addEdge(newEdge, eds));
+    try {
+      const sourceEquipo = params.source;
+      const targetEquipo = params.target;
 
-    // Agregar ruta a routingData
-    if (onRoutingDataChange) {
-      const sourceEquipo = nodes.find(n => n.id === params.source)?.data.label;
-      const targetEquipo = nodes.find(n => n.id === params.target)?.data.label;
-
-      if (sourceEquipo && targetEquipo) {
-        const newRoute = {
-          Equipo: sourceEquipo,
-          IP_Destino: '0.0.0.0',
-          Mascara: '/0',
-          Gateway: 'directo', // Por defecto, el usuario puede editarlo después
-        };
-        onRoutingDataChange([...routingData, newRoute]);
+      // Validación 1: No conectar un nodo consigo mismo
+      if (sourceEquipo === targetEquipo) {
+        alert('No puedes conectar un nodo consigo mismo');
+        return;
       }
+
+      // Validación 2: Verificar que ambos nodos existen
+      if (!sourceEquipo || !targetEquipo) {
+        alert('Error: Nodos no válidos');
+        return;
+      }
+
+      // Validación 3: Verificar que no exista ya una conexión
+      const existingConnection = routingData.find(r =>
+        r.Equipo === sourceEquipo &&
+        r.Gateway !== 'directo' &&
+        routingData.some(target =>
+          target.Equipo === targetEquipo &&
+          target.Gateway === 'directo' &&
+          isIPInNetwork(r.Gateway, target.IP_Destino, target.Mascara)
+        )
+      );
+
+      if (existingConnection) {
+        alert(`Ya existe una conexión entre ${sourceEquipo} y ${targetEquipo}`);
+        return;
+      }
+
+      // Obtener la red del equipo destino
+      const targetNetwork = getEquipmentNetwork(targetEquipo);
+
+      if (!targetNetwork) {
+        // Si el equipo destino no tiene una red configurada, pedirla al usuario
+        const ipDestino = prompt(
+          `El equipo "${targetEquipo}" necesita una red configurada.\n\nIngresa la IP de red (ej: 192.168.1.0):`,
+          '192.168.1.0'
+        );
+
+        if (!ipDestino) {
+          alert('Se canceló la conexión');
+          return;
+        }
+
+        const mascara = prompt(
+          `Ingresa la máscara en formato CIDR (ej: /24):`,
+          '/24'
+        );
+
+        if (!mascara) {
+          alert('Se canceló la conexión');
+          return;
+        }
+
+        // Agregar la red directa al equipo destino
+        const newTargetRoute = {
+          Equipo: targetEquipo,
+          IP_Destino: ipDestino,
+          Mascara: mascara,
+          Gateway: 'directo'
+        };
+
+        // Pedir el gateway (debe estar dentro de la red del destino)
+        const gateway = prompt(
+          `Ingresa la IP del gateway en ${sourceEquipo} para alcanzar ${targetEquipo}\n(debe estar en la red ${ipDestino}${mascara}):`,
+          ipDestino.replace(/\d+$/, '1')
+        );
+
+        if (!gateway) {
+          alert('Se canceló la conexión');
+          return;
+        }
+
+        // Crear la ruta en el equipo origen
+        const newSourceRoute = {
+          Equipo: sourceEquipo,
+          IP_Destino: ipDestino,
+          Mascara: mascara,
+          Gateway: gateway
+        };
+
+        // Actualizar routingData con ambas rutas
+        if (onRoutingDataChange) {
+          onRoutingDataChange([...routingData, newTargetRoute, newSourceRoute]);
+        }
+      } else {
+        // El equipo destino ya tiene una red configurada
+        const gateway = prompt(
+          `Ingresa la IP del gateway en ${sourceEquipo} para alcanzar la red ${targetNetwork.IP_Destino}${targetNetwork.Mascara} de ${targetEquipo}:`,
+          targetNetwork.IP_Destino.replace(/\d+$/, '1')
+        );
+
+        if (!gateway) {
+          alert('Se canceló la conexión');
+          return;
+        }
+
+        // Crear la ruta en el equipo origen
+        const newSourceRoute = {
+          Equipo: sourceEquipo,
+          IP_Destino: targetNetwork.IP_Destino,
+          Mascara: targetNetwork.Mascara,
+          Gateway: gateway
+        };
+
+        // Actualizar routingData
+        if (onRoutingDataChange) {
+          onRoutingDataChange([...routingData, newSourceRoute]);
+        }
+      }
+    } finally {
+      // Resetear el flag después de un breve delay
+      setTimeout(() => {
+        isConnectingRef.current = false;
+      }, 100);
     }
-  }, [editMode, nodes, setEdges, routingData, onRoutingDataChange]);
+  }, [editMode, routingData, onRoutingDataChange]);
 
   // Agregar nuevo nodo
   const handleAddNode = useCallback(() => {
@@ -169,59 +296,69 @@ const NetworkDiagram = ({ routingData, traceResult, onRoutingDataChange, editMod
     const newNodeName = prompt('Nombre del nuevo equipo:');
     if (!newNodeName || newNodeName.trim() === '') return;
 
-    const newNode = {
-      id: newNodeName,
-      data: { label: newNodeName },
-      position: { x: 400, y: 300 },
-      style: {
-        background: '#f3f4f6',
-        color: '#1f2937',
-        border: '2px solid #d1d5db',
-        borderRadius: '8px',
-        padding: '12px 20px',
-        fontSize: '14px',
-        fontWeight: 'normal',
-        boxShadow: '0 2px 4px rgba(0,0,0,0.1)',
-      },
-    };
+    // Validar que no exista ya
+    const exists = routingData.some(r => r.Equipo === newNodeName);
+    if (exists) {
+      alert('Ya existe un equipo con ese nombre');
+      return;
+    }
 
-    setNodes((nds) => [...nds, newNode]);
+    // Pedir configuración de red
+    const ipDestino = prompt(
+      'Ingresa la IP de red del nuevo equipo (ej: 192.168.1.0):',
+      '192.168.1.0'
+    );
 
-    // Agregar entrada de ruteo por defecto
+    if (!ipDestino) return;
+
+    const mascara = prompt(
+      'Ingresa la máscara en formato CIDR (ej: /24):',
+      '/24'
+    );
+
+    if (!mascara) return;
+
+    // Calcular posición para el nuevo nodo
+    const existingPositions = Object.values(nodePositionsRef.current);
+    let newPosition;
+
+    if (existingPositions.length === 0) {
+      newPosition = { x: 400, y: 300 };
+    } else {
+      // Colocar en una posición ligeramente desplazada del centro
+      const offset = existingPositions.length * 50;
+      newPosition = { x: 400 + offset, y: 300 + offset };
+    }
+
+    nodePositionsRef.current[newNodeName] = newPosition;
+
+    // Agregar entrada de ruteo
     if (onRoutingDataChange) {
       const newRoute = {
         Equipo: newNodeName,
-        IP_Destino: '0.0.0.0',
-        Mascara: '/0',
+        IP_Destino: ipDestino,
+        Mascara: mascara,
         Gateway: 'directo',
       };
       onRoutingDataChange([...routingData, newRoute]);
     }
-  }, [editMode, setNodes, routingData, onRoutingDataChange]);
+  }, [editMode, routingData, onRoutingDataChange]);
 
   // Eliminar nodo
   const handleDeleteNode = useCallback((nodeId) => {
     if (!editMode) return;
 
-    if (confirm('¿Eliminar este nodo y todas sus conexiones?')) {
-      setNodes((nds) => nds.filter(n => n.id !== nodeId));
-      setEdges((eds) => eds.filter(e => e.source !== nodeId && e.target !== nodeId));
+    if (confirm(`¿Eliminar el equipo "${nodeId}" y todas sus rutas?`)) {
+      // Eliminar posición guardada
+      delete nodePositionsRef.current[nodeId];
 
-      // Eliminar de routingData
+      // Eliminar de routingData (todas las rutas de este equipo)
       if (onRoutingDataChange) {
-        const nodeName = nodes.find(n => n.id === nodeId)?.data.label;
-        const filtered = routingData.filter(r => r.Equipo !== nodeName);
+        const filtered = routingData.filter(r => r.Equipo !== nodeId);
         onRoutingDataChange(filtered);
       }
     }
-  }, [editMode, nodes, setNodes, setEdges, routingData, onRoutingDataChange]);
-
-  // Eliminar edge
-  const handleDeleteEdge = useCallback((edgeId) => {
-    if (!editMode) return;
-
-    setEdges((eds) => eds.filter(e => e.id !== edgeId));
-  }, [editMode, setEdges]);
+  }, [editMode, routingData, onRoutingDataChange]);
 
   // Manejador de doble click en nodos (para editar)
   const onNodeDoubleClick = useCallback((event, node) => {
@@ -229,14 +366,16 @@ const NetworkDiagram = ({ routingData, traceResult, onRoutingDataChange, editMod
 
     const newName = prompt('Nuevo nombre del equipo:', node.data.label);
     if (newName && newName.trim() !== '' && newName !== node.data.label) {
-      // Actualizar nodo
-      setNodes((nds) =>
-        nds.map((n) =>
-          n.id === node.id
-            ? { ...n, data: { ...n.data, label: newName } }
-            : n
-        )
-      );
+      // Validar que no exista ya
+      const exists = routingData.some(r => r.Equipo === newName);
+      if (exists) {
+        alert('Ya existe un equipo con ese nombre');
+        return;
+      }
+
+      // Actualizar posición en el ref
+      nodePositionsRef.current[newName] = nodePositionsRef.current[node.data.label];
+      delete nodePositionsRef.current[node.data.label];
 
       // Actualizar routingData
       if (onRoutingDataChange) {
@@ -248,7 +387,7 @@ const NetworkDiagram = ({ routingData, traceResult, onRoutingDataChange, editMod
         onRoutingDataChange(updated);
       }
     }
-  }, [editMode, setNodes, routingData, onRoutingDataChange]);
+  }, [editMode, routingData, onRoutingDataChange]);
 
   if (!routingData || routingData.length === 0) {
     return (
@@ -279,7 +418,7 @@ const NetworkDiagram = ({ routingData, traceResult, onRoutingDataChange, editMod
 
       {editMode && (
         <div className="mb-3 p-2 bg-blue-50 border border-blue-200 rounded text-sm text-blue-800">
-          <strong>Modo Edición:</strong> Arrastra para mover nodos. Conecta nodos arrastrando desde un borde. Doble-click en nodos para renombrar.
+          <strong>Modo Edición:</strong> Arrastra para mover nodos. Conecta nodos arrastrando desde un borde a otro nodo. Doble-click en nodos para renombrar.
         </div>
       )}
 
@@ -287,7 +426,7 @@ const NetworkDiagram = ({ routingData, traceResult, onRoutingDataChange, editMod
         <ReactFlow
           nodes={nodes}
           edges={edges}
-          onNodesChange={onNodesChange}
+          onNodesChange={handleNodesChange}
           onEdgesChange={onEdgesChange}
           onConnect={onConnect}
           onNodeDoubleClick={onNodeDoubleClick}
